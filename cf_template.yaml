@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "(Cloudfront-as-default-00) Simple CloudFront distribution with an S3 origin"
+
+#----------------------------------------
+# Template Parameters
+#----------------------------------------
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: "The domain name for your CloudFront distribution (e.g., www.example.com)"
+  HostedZoneId:
+    Type: String
+    Description: "The Route 53 Hosted Zone ID for your domain"
+  AcmCertificateArn:
+    Type: String
+    Description: "ARN of ACM certificate (must be in us-east-1)"
+
+#----------------------------------------
+# Resources
+#----------------------------------------
+
+Resources:
+  #----------------------------------------------------------------------------
+  # S3 Bucket
+  # - Creates a private bucket to store the website content
+  # - Bucket name is generated using stack name and account ID for uniqueness
+  #----------------------------------------------------------------------------
+  S3Bucket:
+    DeletionPolicy: "Delete" # Bucket will be deleted when stack is deleted
+    Metadata:
+      Comment: "Bucket to store some data"
+    Properties:
+      AccessControl: "Private" # Bucket is private - access only through CloudFront
+      BucketName: !Sub "cf-simple-s3-origin-${AWS::StackName}-${AWS::AccountId}"
+    Type: "AWS::S3::Bucket"
+
+  #----------------------------------------------------------------------------
+  # S3 Bucket Policy
+  # - Grants CloudFront permission to access objects in the S3 bucket
+  # - Only allows access through the CloudFront distribution
+  #----------------------------------------------------------------------------
+  S3BucketPolicy:
+    Metadata:
+      Comment: "Bucket policy to allow cloudfront to access the data"
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - "s3:GetObject"
+            Effect: "Allow"
+            Principal:
+              CanonicalUser: !GetAtt CfOriginAccessIdentity.S3CanonicalUserId
+            Resource:
+              - !Sub "arn:aws:s3:::${S3Bucket}/*"
+    Type: "AWS::S3::BucketPolicy"
+
+  #----------------------------------------------------------------------------
+  # CloudFront Distribution
+  # - Main CDN configuration
+  # - Includes custom domain, SSL certificate, and cache behaviors
+  #----------------------------------------------------------------------------
+  CfDistribution:
+    Metadata:
+      Comment: "CloudFront distribution with S3 origin, custom domain, and SSL"
+    Properties:
+      DistributionConfig:
+        Comment: "Distribution with S3 origin and custom domain"
+        Aliases:
+          - !Ref DomainName # Your custom domain name
+        DefaultCacheBehavior:
+          AllowedMethods: # Only allow read operations
+            - "HEAD"
+            - "GET"
+          CachedMethods: # Cache responses for GET and HEAD requests
+            - "HEAD"
+            - "GET"
+          Compress: false # Disable automatic compression
+          DefaultTTL: 86400 # Default cache duration: 24 hours
+          ForwardedValues:
+            Cookies:
+              Forward: "none" # Don't forward cookies to origin
+            Headers:
+              - "Origin" # Only forward Origin header
+            QueryString: false # Don't forward query strings
+          MaxTTL: 31536000 # Maximum cache duration: 365 days
+          MinTTL: 86400 # Minimum cache duration: 24 hours
+          TargetOriginId: !Sub "s3-origin-${S3Bucket}"
+          ViewerProtocolPolicy: "redirect-to-https" # Force HTTPS
+        DefaultRootObject: "index.html" # Default page
+        Enabled: true # Enable the distribution
+        HttpVersion: "http1.1"
+        IPV6Enabled: false # IPv6 disabled
+        Origins:
+          - DomainName: !GetAtt S3Bucket.DomainName
+            Id: !Sub "s3-origin-${S3Bucket}"
+            OriginPath: "" # No path prefix
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CfOriginAccessIdentity}"
+        PriceClass: "PriceClass_All" # Use all edge locations
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          MinimumProtocolVersion: TLSv1.2_2021 # Minimum TLS version
+          SslSupportMethod: sni-only # Use SNI for SSL
+    Type: "AWS::CloudFront::Distribution"
+
+  #----------------------------------------------------------------------------
+  # CloudFront Origin Access Identity
+  # - Special CloudFront user that can access S3
+  # - Provides secure access to private S3 bucket
+  #----------------------------------------------------------------------------
+  CfOriginAccessIdentity:
+    Metadata:
+      Comment: "Access S3 bucket content only through CloudFront"
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: "Access S3 bucket content only through CloudFront"
+    Type: "AWS::CloudFront::CloudFrontOriginAccessIdentity"
+
+  #----------------------------------------------------------------------------
+  # Route 53 DNS Record
+  # - Creates an A record alias pointing to CloudFront
+  # - Allows access to the distribution via your custom domain
+  #----------------------------------------------------------------------------
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A # IPv4 address record
+      AliasTarget:
+        DNSName: !GetAtt CfDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2 # CloudFront's fixed hosted zone ID
+        EvaluateTargetHealth: false
+
+#----------------------------------------
+# Stack Outputs
+#----------------------------------------
+Outputs:
+  S3BucketName:
+    Description: "Name of the S3 bucket containing the website content"
+    Value: !Ref S3Bucket
+  CfDistributionId:
+    Description: "ID of the CloudFront distribution"
+    Value: !Ref CfDistribution
+  CfDistributionDomainName:
+    Description: "CloudFront distribution domain name"
+    Value: !GetAtt CfDistribution.DomainName
+  CustomDomain:
+    Description: "Custom domain name pointing to the distribution"
+    Value: !Ref DomainName
